@@ -1,98 +1,93 @@
 import gym
-from torch import nn
 import torch
 from collections import deque
+from copy import deepcopy
 import copy
 import random
 import matplotlib.pyplot as plt
 from IPython import display
 
-env = gym.envs.make('CartPole-v0')
 
-
-class Network(nn.Module):
+class DQN(torch.nn.Module):
     def __init__(self, in_size, out_size):
-        super(Network, self).__init__()
-        self.linear1 = nn.Linear(in_features=in_size, out_features=64)
-        self.linear2 = nn.Linear(in_features=64, out_features=out_size)
+        super(DQN, self).__init__()
+        self.linear1 = torch.nn.Linear(in_features=in_size, out_features=20)
+        self.linear2 = torch.nn.Linear(in_features=20, out_features=out_size)
+        #self.linear3 = torch.nn.Linear(in_features=30, out_features=out_size)
 
     def forward(self, x):
-        x = torch.nn.functional.tanh(self.linear1(x))
-        x = torch.nn.functional.tanh(self.linear2(x))
+        x = torch.relu(self.linear1(x))
+        x = torch.relu(self.linear2(x))
+        #x = torch.relu(self.linear3(x))
         return x
 
 
 class Agent:
-    def __init__(self):
-        torch.manual_seed(1423)
-        self.policy_net = Network(in_size=4, out_size=2)
-        self.target_net = copy.deepcopy(self.policy_net)
-        self.epsilon = 1
-        self.max_replay_size = 256
-        self.replay = deque(maxlen=self.max_replay_size)
-        self.action_space_len = env.action_space.n
-        self.gamma = torch.tensor(0.95).float()
-        self.loss = nn.MSELoss()
+    def __init__(self, in_size, out_size):
+        self.memory_replay_size = 200
+        self.memory = deque(maxlen=self.memory_replay_size)
+
+        self.policy_net = DQN(in_size=in_size, out_size=out_size)
+        self.target_net = deepcopy(self.policy_net)
+        self.target_net.eval()
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=0.001)
-
+        self.loss = torch.nn.MSELoss()
         self.sync_counter = 0
-        self.sync = 5
-
-    def make_step(self, state):
-        if torch.rand(1,).item() > self.epsilon:
-            with torch.no_grad():
-                action = self.policy_net(torch.tensor(state).float())
-            _, action = torch.max(action, 0)
-        else:
-            action = torch.randint(0, self.action_space_len, (1,))
-        return action.item()
-
-    def get_q_next(self, state):
-        with torch.no_grad():
-            action = self.policy_net(torch.tensor(state).float())
-        _, action = torch.max(action, 1)
-        return action
+        self.sync = 10
+        self.gamma = torch.tensor([0.95]).float()
+        self.epsilon = 1
+        self.min_epsilon = 0.05
 
     def add_experience(self, experience):
-        self.replay.append(experience)
+        self.memory.append(experience)
 
-    def sample_from_experience(self, sample_size):
-        sample = random.sample(self.replay, sample_size)
-        states = torch.tensor([exp[0] for exp in sample]).float()
-        actions = torch.tensor([exp[1] for exp in sample]).float()
-        rewards = torch.tensor([exp[2] for exp in sample]).float()
-        next_states = torch.tensor([exp[3] for exp in sample]).float()
-        return states, actions, rewards, next_states
+    def get_action(self, state):
+        if random.random() > self.epsilon:
+            with torch.no_grad():
+                action = self.policy_net(state).max(0)[1].item()
+            return action
+        else:
+            return random.randint(0, 1)
+
+    def get_sample(self, batch_size):
+        sample = random.sample(self.memory, batch_size)
+        s = torch.tensor([exp[0] for exp in sample]).float()
+        n_s = torch.tensor([exp[1] for exp in sample]).float()
+        r = torch.tensor([exp[2] for exp in sample]).float()
+        a = torch.tensor([exp[3] for exp in sample]).float()
+        d = torch.tensor([exp[4] for exp in sample]).float()
+        return s, n_s, r, a, d
 
     def train(self, batch_size):
-        if len(self.replay) < batch_size:
+        if len(self.memory) < batch_size:
             return
-        s, a, r, sn = self.sample_from_experience(batch_size)
+
         if self.sync_counter == self.sync:
-            self.target_net.load_state_dict(self.policy_net.state_dict())
             self.sync_counter = 0
-            #print(self.policy_net(s[0]))
-            #print(self.target_net(s[0]))
-            #print('-----------')
-
-        qp = self.policy_net(s)
-        pred_return, actions = torch.max(qp, 1)
-        print(actions)
-
-        q_next = self.get_q_next(sn)
-        target_return = r + self.gamma * q_next
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+        else:
+            self.sync_counter += 1
 
         self.optimizer.zero_grad()
-        loss = self.loss(pred_return, target_return)
+
+        s, n_s, r, a, d = self.get_sample(batch_size)
+
+        q_next = self.target_net(n_s).max(1)[0]
+        t_return = r + torch.mul(q_next * self.gamma, (~d.bool()).float())
+        current = self.policy_net(s)
+        target = current.clone()
+
+        for i in range(len(target)):
+            target[i][a[i].long()] = t_return[i]
+
+        target = current + self.gamma * (target - current)
+
+        loss = self.loss(current, target)
         loss.backward()
         self.optimizer.step()
 
-        self.sync_counter += 1
 
-        return loss.item()
-
-
-def plot_durations(x, y):
+def plot(x, y):
     plt.figure(2)
     plt.clf()
     plt.title('Training...')
@@ -100,37 +95,38 @@ def plot_durations(x, y):
     plt.ylabel('y')
 
     lines = plt.plot(x, y)
-    plt.setp(lines[0], linewidth=1)
+    plt.setp(lines[0], linewidth=2)
 
     plt.pause(0.0001)
     display.clear_output(wait=True)
     display.display(plt.gcf())
 
 
-agent = Agent()
+env = gym.envs.make('CartPole-v1')
 
-episodes = 10000
+env.reset()
 
-episodes_list = []
-episode_length = []
+epochs = 3000
 
-index = 0
+agent = Agent(in_size=4, out_size=2)
 
-for i in range(episodes):
-    observation, done = env.reset(), False
+i = 0
+
+epoch_lengths = []
+
+for epoch in range(epochs):
+    state, done = env.reset(), False
     length = 0
     while not done:
         length += 1
-        index += 1
-        action = agent.make_step(observation)
-        observation_next, reward, done, _ = env.step(action)
-        agent.add_experience([observation, action, reward, observation_next])
-        observation = observation_next
+
+        action = agent.get_action(torch.from_numpy(state).float())
+        next_state, reward, done, _ = env.step(action)
+        agent.add_experience([state, next_state, reward, action, done])
+        state = next_state
         agent.train(16)
         env.render()
-    episodes_list.append(i)
-    episode_length.append(length)
-    if i % 20 == 0:
-        plot_durations(episodes_list, episode_length)
-    if agent.epsilon > 0.05:
-        agent.epsilon -= 1/5000
+    epoch_lengths.append(length)
+    agent.epsilon = max(agent.min_epsilon, agent.epsilon-1/2000)
+    if epoch % 10 == 0:
+        plot(range(epoch + 1), epoch_lengths)
