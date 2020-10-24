@@ -1,2 +1,2 @@
-# Convolutional Neural Network from Scratch
+# Reinforcement Learning CartPole
 
